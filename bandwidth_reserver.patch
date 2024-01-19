@@ -1,22 +1,30 @@
+From e9358900b84495d44dee83f73f4971e77e83053a Mon Sep 17 00:00:00 2001
+From: aothatday <manglienket2001@gmail.com>
+Date: Fri, 19 Jan 2024 00:23:18 -0800
+Subject: [PATCH] Apply patch
+
+---
  .gitignore                      |   1 +
  controller/automake.mk          |   4 +-
- controller/bandwidth-reserver.h |  36 +++++
- controller/bandwidth-reverser.c | 340 ++++++++++++++++++++++++++++++++++++++++
+ controller/bandwidth-reserver.h |  36 ++++
+ controller/bandwidth-reverser.c | 340 ++++++++++++++++++++++++++++++++
  controller/ovn-controller.c     |   8 +
  northd/en-northd.c              |   4 +
  northd/inc-proc-northd.c        |   8 +-
- northd/northd.c                 | 251 ++++++++++++++++++++++++++++-
+ northd/northd.c                 | 251 ++++++++++++++++++++++-
  northd/northd.h                 |   3 +
- ovn-nb.ovsschema                |  18 ++-
- ovn-nb.xml                      |  42 +++++
- ovn-sb.ovsschema                |  18 ++-
- ovn-sb.xml                      |  43 +++++
- ovs                             |   1 +
- utilities/ovn-nbctl.c           | 291 ++++++++++++++++++++++++++++++++++
- 15 files changed, 1059 insertions(+), 9 deletions(-)
+ ovn-nb.ovsschema                |  18 +-
+ ovn-nb.xml                      |  42 ++++
+ ovn-sb.ovsschema                |  18 +-
+ ovn-sb.xml                      |  43 ++++
+ ovs                             |   2 +-
+ utilities/ovn-nbctl.c           | 291 +++++++++++++++++++++++++++
+ 15 files changed, 1059 insertions(+), 10 deletions(-)
+ create mode 100644 controller/bandwidth-reserver.h
+ create mode 100644 controller/bandwidth-reverser.c
 
 diff --git a/.gitignore b/.gitignore
-index 7ca9b38..a03a169 100644
+index 7ca9b3859..a03a169b3 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -94,3 +94,4 @@ testsuite.tmp.orig
@@ -25,7 +33,7 @@ index 7ca9b38..a03a169 100644
  /*.ovsschema.stamp
 +/.vscode
 diff --git a/controller/automake.mk b/controller/automake.mk
-index c2ab1bb..0198e1a 100644
+index c2ab1bbe6..0198e1a24 100644
 --- a/controller/automake.mk
 +++ b/controller/automake.mk
 @@ -41,7 +41,9 @@ controller_ovn_controller_SOURCES = \
@@ -41,7 +49,7 @@ index c2ab1bb..0198e1a 100644
  man_MANS += controller/ovn-controller.8
 diff --git a/controller/bandwidth-reserver.h b/controller/bandwidth-reserver.h
 new file mode 100644
-index 0000000..562022b
+index 000000000..562022bd6
 --- /dev/null
 +++ b/controller/bandwidth-reserver.h
 @@ -0,0 +1,36 @@
@@ -83,7 +91,7 @@ index 0000000..562022b
 +#endif
 diff --git a/controller/bandwidth-reverser.c b/controller/bandwidth-reverser.c
 new file mode 100644
-index 0000000..5ea91bd
+index 000000000..5ea91bdfe
 --- /dev/null
 +++ b/controller/bandwidth-reverser.c
 @@ -0,0 +1,340 @@
@@ -429,7 +437,7 @@ index 0000000..5ea91bd
 +}
 \ No newline at end of file
 diff --git a/controller/ovn-controller.c b/controller/ovn-controller.c
-index be340d0..0db97eb 100644
+index 2afb94611..4ca577692 100644
 --- a/controller/ovn-controller.c
 +++ b/controller/ovn-controller.c
 @@ -76,6 +76,7 @@
@@ -448,19 +456,19 @@ index be340d0..0db97eb 100644
      vif_plug_provider_initialize();
  
      /* Connect to OVS OVSDB instance. */
-@@ -4032,6 +4034,11 @@ main(int argc, char *argv[])
-                                     &runtime_data->local_active_ports_ras);
+@@ -4045,6 +4047,11 @@ main(int argc, char *argv[])
+                                             ovs_idl_loop.idl));
                          stopwatch_stop(PINCTRL_RUN_STOPWATCH_NAME,
                                         time_msec());
 +                        // hai dang code
 +                        bandwidth_reserver_run(ovs_idl_txn,
 +                                               ovsrec_qos_table_get(ovs_idl_loop.idl),
-+                                               br_int, 
++                                               br_int,
 +                                               &runtime_data->lbinding_data.bindings);
                          /* Updating monitor conditions if runtime data or
                           * logical datapath goups changed. */
                          if (engine_node_changed(&en_runtime_data)
-@@ -4273,6 +4280,7 @@ loop_done:
+@@ -4286,6 +4293,7 @@ loop_done:
      pinctrl_destroy();
      binding_destroy();
      patch_destroy();
@@ -469,7 +477,7 @@ index be340d0..0db97eb 100644
      if_status_mgr_destroy(if_mgr);
      shash_destroy(&vif_plug_deleted_iface_ids);
 diff --git a/northd/en-northd.c b/northd/en-northd.c
-index 79da7e1..cce7949 100644
+index 79da7e1c4..cce7949b9 100644
 --- a/northd/en-northd.c
 +++ b/northd/en-northd.c
 @@ -70,6 +70,8 @@ void en_northd_run(struct engine_node *node, void *data)
@@ -491,7 +499,7 @@ index 79da7e1..cce7949 100644
          EN_OVSDB_GET(engine_get_input("SB_dns", node));
      input_data.sbrec_ip_multicast_table =
 diff --git a/northd/inc-proc-northd.c b/northd/inc-proc-northd.c
-index af55221..db5af3e 100644
+index af55221e3..db5af3e76 100644
 --- a/northd/inc-proc-northd.c
 +++ b/northd/inc-proc-northd.c
 @@ -60,7 +60,8 @@ VLOG_DEFINE_THIS_MODULE(inc_proc_northd);
@@ -531,7 +539,7 @@ index af55221..db5af3e 100644
      engine_add_input(&en_northd, &en_sb_port_binding, NULL);
      engine_add_input(&en_northd, &en_sb_mac_binding, NULL);
 diff --git a/northd/northd.c b/northd/northd.c
-index fb73aed..8c798bb 100644
+index f35e4ecb0..eff8327d8 100644
 --- a/northd/northd.c
 +++ b/northd/northd.c
 @@ -74,6 +74,9 @@ static struct eth_addr svc_monitor_mac_ea;
@@ -720,7 +728,7 @@ index fb73aed..8c798bb 100644
  /* Egress table 8: Egress port security - IP (priorities 90 and 80)
   * if port security enabled.
   *
-@@ -14008,6 +14148,7 @@ build_lswitch_and_lrouter_iterate_by_op(struct ovn_port *op,
+@@ -14039,6 +14179,7 @@ build_lswitch_and_lrouter_iterate_by_op(struct ovn_port *op,
                                      &lsi->actions, &lsi->match);
      build_lswitch_output_port_sec_op(op, lsi->lflows,
                                       &lsi->actions, &lsi->match);
@@ -728,7 +736,7 @@ index fb73aed..8c798bb 100644
  
      /* Build Logical Router Flows. */
      build_adm_ctrl_flows_for_lrouter_port(op, lsi->lflows, &lsi->match,
-@@ -15112,6 +15253,106 @@ sync_meters(struct northd_input *input_data,
+@@ -15143,6 +15284,106 @@ sync_meters(struct northd_input *input_data,
      shash_destroy(&sb_meters);
  }
  
@@ -835,7 +843,7 @@ index fb73aed..8c798bb 100644
  /*
   * struct 'dns_info' is used to sync the DNS records between OVN Northbound db
   * and Southbound db.
-@@ -15175,7 +15416,7 @@ sync_dns_entries(struct northd_input *input_data,
+@@ -15206,7 +15447,7 @@ sync_dns_entries(struct northd_input *input_data,
                                     input_data->sbrec_dns_table) {
          const char *nb_dns_uuid = smap_get(&sbrec_dns->external_ids, "dns_id");
          struct uuid dns_uuid;
@@ -844,7 +852,7 @@ index fb73aed..8c798bb 100644
              sbrec_dns_delete(sbrec_dns);
              continue;
          }
-@@ -15539,6 +15780,7 @@ northd_destroy(struct northd_data *data)
+@@ -15570,6 +15811,7 @@ northd_destroy(struct northd_data *data)
                                  &data->lr_list);
  }
  
@@ -852,7 +860,7 @@ index fb73aed..8c798bb 100644
  static void
  ovnnb_db_run(struct northd_input *input_data,
               struct northd_data *data,
-@@ -15625,7 +15867,7 @@ ovnnb_db_run(struct northd_input *input_data,
+@@ -15656,7 +15898,7 @@ ovnnb_db_run(struct northd_input *input_data,
      build_ovn_lbs(input_data, ovnsb_txn, &data->datapaths, &data->lbs);
      build_lrouter_lbs(&data->datapaths, &data->lbs);
      build_ports(input_data, ovnsb_txn, sbrec_chassis_by_name,
@@ -861,7 +869,7 @@ index fb73aed..8c798bb 100644
                  &data->datapaths, &data->ports);
      build_lrouter_lbs_reachable_ips(&data->datapaths, &data->lbs);
      build_ovn_lr_lbs(&data->datapaths, &data->lbs);
-@@ -15644,6 +15886,7 @@ ovnnb_db_run(struct northd_input *input_data,
+@@ -15675,6 +15917,7 @@ ovnnb_db_run(struct northd_input *input_data,
      sync_port_groups(input_data, ovnsb_txn, &data->port_groups);
      sync_meters(input_data, ovnsb_txn, &data->meter_groups);
      sync_dns_entries(input_data, ovnsb_txn, &data->datapaths);
@@ -870,7 +878,7 @@ index fb73aed..8c798bb 100644
      stopwatch_stop(CLEAR_LFLOWS_CTX_STOPWATCH_NAME, time_msec());
  
 diff --git a/northd/northd.h b/northd/northd.h
-index e7ed26c..e6ee95c 100644
+index e7ed26c10..e6ee95ce8 100644
 --- a/northd/northd.h
 +++ b/northd/northd.h
 @@ -18,6 +18,7 @@
@@ -898,7 +906,7 @@ index e7ed26c..e6ee95c 100644
      const struct sbrec_dns_table *sbrec_dns_table;
      const struct sbrec_ip_multicast_table *sbrec_ip_multicast_table;
 diff --git a/ovn-nb.ovsschema b/ovn-nb.ovsschema
-index 80b8306..0a194c0 100644
+index 80b830629..0a194c080 100644
 --- a/ovn-nb.ovsschema
 +++ b/ovn-nb.ovsschema
 @@ -1,7 +1,7 @@
@@ -941,7 +949,7 @@ index 80b8306..0a194c0 100644
              "columns": {
                  "name": {"type": "string"},
 diff --git a/ovn-nb.xml b/ovn-nb.xml
-index d8781d1..ed9728b 100644
+index d05f96942..19e636adf 100644
 --- a/ovn-nb.xml
 +++ b/ovn-nb.xml
 @@ -860,6 +860,10 @@
@@ -1001,7 +1009,7 @@ index d8781d1..ed9728b 100644
      <p>
        Each row in this table represents a meter that can be used for QoS or
 diff --git a/ovn-sb.ovsschema b/ovn-sb.ovsschema
-index 122614d..bb04c6b 100644
+index 122614dd5..bb04c6b9d 100644
 --- a/ovn-sb.ovsschema
 +++ b/ovn-sb.ovsschema
 @@ -1,7 +1,7 @@
@@ -1044,7 +1052,7 @@ index 122614d..bb04c6b 100644
                       "type": {"key": "string",
                                "value": "string",
 diff --git a/ovn-sb.xml b/ovn-sb.xml
-index b1c9857..56ca35b 100644
+index b1c985746..56ca35b7e 100644
 --- a/ovn-sb.xml
 +++ b/ovn-sb.xml
 @@ -2662,6 +2662,44 @@ tcp.flags = RST;
@@ -1105,14 +1113,14 @@ index b1c9857..56ca35b 100644
        <column name="encap">
          Points to supported encapsulation configurations to transmit
 diff --git a/ovs b/ovs
-new file mode 160000
-index 0000000..b5dec43
---- /dev/null
+index 94191b7a4..b5dec433c 160000
+--- a/ovs
 +++ b/ovs
-@@ -0,0 +1 @@
+@@ -1 +1 @@
+-Subproject commit 94191b7a4926204510931770c52992c9ea24d4e2
 +Subproject commit b5dec433cb5e14f03cc31f47ce75f3f7bc58905c
 diff --git a/utilities/ovn-nbctl.c b/utilities/ovn-nbctl.c
-index 2d78167..5ac3ed1 100644
+index 751a9011d..f7845ca1a 100644
 --- a/utilities/ovn-nbctl.c
 +++ b/utilities/ovn-nbctl.c
 @@ -271,6 +271,15 @@ QoS commands:\n\
@@ -1131,7 +1139,7 @@ index 2d78167..5ac3ed1 100644
  Meter commands:\n\
    [--fair]\n\
    meter-add NAME ACTION RATE UNIT [BURST]\n\
-@@ -6905,6 +6914,278 @@ cmd_ha_ch_grp_set_chassis_prio(struct ctl_context *ctx)
+@@ -6906,6 +6915,278 @@ cmd_ha_ch_grp_set_chassis_prio(struct ctl_context *ctx)
      nbrec_ha_chassis_set_priority(ha_chassis, priority);
  }
  
@@ -1410,7 +1418,7 @@ index 2d78167..5ac3ed1 100644
  static const struct ctl_table_class tables[NBREC_N_TABLES] = {
      [NBREC_TABLE_DHCP_OPTIONS].row_ids
      = {{&nbrec_logical_switch_port_col_name, NULL,
-@@ -6998,6 +7279,16 @@ static const struct ctl_command_syntax nbctl_commands[] = {
+@@ -6999,6 +7280,16 @@ static const struct ctl_command_syntax nbctl_commands[] = {
      { "qos-list", 1, 1, "SWITCH", nbctl_pre_qos_list, nbctl_qos_list,
        NULL, "", RO },
  
@@ -1427,3 +1435,6 @@ index 2d78167..5ac3ed1 100644
      /* meter commands. */
      { "meter-add", 4, 5, "NAME ACTION RATE UNIT [BURST]", nbctl_pre_meter_add,
        nbctl_meter_add, NULL, "--fair,--may-exist", RW },
+-- 
+2.25.1
+
