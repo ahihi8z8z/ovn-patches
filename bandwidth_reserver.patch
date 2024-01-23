@@ -1,32 +1,31 @@
- .gitignore                      |   2 +
+ .gitignore                      |   1 +
  controller/automake.mk          |   4 +-
- controller/bandwidth-reserver.c | 370 ++++++++++++++++++++++++++++++++++++++++
- controller/bandwidth-reserver.h |  37 ++++
- controller/ovn-controller.c     |  13 ++
+ controller/bandwidth-reserver.h |  36 +++++
+ controller/bandwidth-reverser.c | 340 ++++++++++++++++++++++++++++++++++++++++
+ controller/ovn-controller.c     |   8 +
  northd/en-northd.c              |   4 +
  northd/inc-proc-northd.c        |   8 +-
- northd/northd.c                 | 318 +++++++++++++++++++++++++++++++++-
+ northd/northd.c                 | 251 ++++++++++++++++++++++++++++-
  northd/northd.h                 |   3 +
- ovn-nb.ovsschema                |  18 +-
+ ovn-nb.ovsschema                |  18 ++-
  ovn-nb.xml                      |  42 +++++
- ovn-sb.ovsschema                |  24 ++-
- ovn-sb.xml                      |  55 ++++++
- utilities/ovn-nbctl.c           | 291 +++++++++++++++++++++++++++++++
- 14 files changed, 1180 insertions(+), 9 deletions(-)
+ ovn-sb.ovsschema                |  18 ++-
+ ovn-sb.xml                      |  43 +++++
+ ovs                             |   1 +
+ utilities/ovn-nbctl.c           | 291 ++++++++++++++++++++++++++++++++++
+ 15 files changed, 1059 insertions(+), 9 deletions(-)
 
 diff --git a/.gitignore b/.gitignore
-index 7ca9b3859..e1edf28c5 100644
+index 7ca9b38..a03a169 100644
 --- a/.gitignore
 +++ b/.gitignore
-@@ -94,3 +94,5 @@ testsuite.tmp.orig
+@@ -94,3 +94,4 @@ testsuite.tmp.orig
  /.venv
  /cxx-check
  /*.ovsschema.stamp
 +/.vscode
-+/*.patch
-\ No newline at end of file
 diff --git a/controller/automake.mk b/controller/automake.mk
-index c2ab1bbe6..85524387e 100644
+index c2ab1bb..0198e1a 100644
 --- a/controller/automake.mk
 +++ b/controller/automake.mk
 @@ -41,7 +41,9 @@ controller_ovn_controller_SOURCES = \
@@ -36,16 +35,58 @@ index c2ab1bbe6..85524387e 100644
 -	controller/vif-plug.c
 +	controller/vif-plug.c \
 +	controller/bandwidth-reserver.h \
-+	controller/bandwidth-reserver.c
++	controller/bandwidth-reverser.c
  
  controller_ovn_controller_LDADD = lib/libovn.la $(OVS_LIBDIR)/libopenvswitch.la
  man_MANS += controller/ovn-controller.8
-diff --git a/controller/bandwidth-reserver.c b/controller/bandwidth-reserver.c
+diff --git a/controller/bandwidth-reserver.h b/controller/bandwidth-reserver.h
 new file mode 100644
-index 000000000..9e6790b1f
+index 0000000..562022b
 --- /dev/null
-+++ b/controller/bandwidth-reserver.c
-@@ -0,0 +1,370 @@
++++ b/controller/bandwidth-reserver.h
+@@ -0,0 +1,36 @@
++/* Copyright 2024 manglienket2001@gmai.com.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at:
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++
++#ifndef OVN_BANDWIDTH_RESERVER_H
++#define OVN_BANDWIDTH_RESERVER_H 1
++
++#include "openvswitch/shash.h"
++
++#define OVN_QOS_TYPE "linux-htb"
++
++struct ovsdb_idl_txn;
++struct ovsrec_bridge;
++struct sbrec_bandwidth_reserver_table;
++struct shash;
++         
++void bandwidth_reserver_init(void);
++void bandwidth_reserver_destroy(void);
++void bandwidth_reserver_run(struct ovsdb_idl_txn *,
++                            const struct ovsrec_qos_table *, 
++                            const struct ovsrec_bridge *,
++                            struct shash *local_bindings);
++
++#endif
+diff --git a/controller/bandwidth-reverser.c b/controller/bandwidth-reverser.c
+new file mode 100644
+index 0000000..5ea91bd
+--- /dev/null
++++ b/controller/bandwidth-reverser.c
+@@ -0,0 +1,340 @@
 +/* Copyright 2024 manglienket2001@gmai.com
 + *
 + * Licensed under the Apache License, Version 2.0 (the "License");
@@ -94,19 +135,6 @@ index 000000000..9e6790b1f
 +    const struct ovsrec_queue *ovs_bw_rsv_queue;
 +};
 +
-+void bandwidth_reserver_register_ovs_idl(struct ovsdb_idl *ovs_idl) {
-+    ovsdb_idl_add_table(ovs_idl, &ovsrec_table_queue);
-+    ovsdb_idl_add_column(ovs_idl, &ovsrec_queue_col_dscp);
-+    ovsdb_idl_add_column(ovs_idl, &ovsrec_queue_col_other_config);
-+    ovsdb_idl_add_column(ovs_idl, &ovsrec_queue_col_external_ids);
-+
-+    ovsdb_idl_add_table(ovs_idl, &ovsrec_table_qos);
-+    ovsdb_idl_add_column(ovs_idl, &ovsrec_qos_col_external_ids);
-+    ovsdb_idl_add_column(ovs_idl, &ovsrec_qos_col_other_config);
-+    ovsdb_idl_add_column(ovs_idl, &ovsrec_qos_col_queues);
-+    ovsdb_idl_add_column(ovs_idl, &ovsrec_qos_col_type);
-+}
-+
 +
 +static void
 +set_qos_type(struct netdev *netdev, const char *type)
@@ -131,14 +159,12 @@ index 000000000..9e6790b1f
 +                                       struct ovsdb_idl_txn *ovs_idl_txn,
 +                                       struct shash *ovn_bw_rsvs ) {
 +    const struct ovsrec_qos *bw_rsv_qos;
-+    bool bw_rsv_qos_check = false;
-+
 +    OVSREC_QOS_TABLE_FOR_EACH (bw_rsv_qos, qos_table) {
-+        bw_rsv_qos_check = smap_get_bool(&bw_rsv_qos->external_ids,"bandwidth-reserver-qos", false);
++        bool bw_rsv_qos_check = smap_get_bool (&bw_rsv_qos->external_ids, "bandwidth_reserver_qos", false);
 +        if (bw_rsv_qos_check) {
 +            for( size_t i = 0; i < bw_rsv_qos->n_queues; i++) {
 +                struct smap external_ids = bw_rsv_qos->value_queues[i]->external_ids;
-+                const char *queue_match = smap_get(&external_ids,"bandwidth-reserver-match");
++                const char *queue_match = smap_get(&external_ids,"bandwidth_reserver_match");
 +                struct ovn_bw_rsv *m = shash_find_data(ovn_bw_rsvs,queue_match);
 +                if(!m) {
 +                    m = xzalloc(sizeof *m);
@@ -148,24 +174,15 @@ index 000000000..9e6790b1f
 +                }
 +                m->ovs_bw_rsv_queue = bw_rsv_qos->value_queues[i];
 +            }
-+            break;
 +        }
 +    }
-+
 +    /* If there isn't bandwidth_reserver_qos, create one*/
-+    if (!bw_rsv_qos_check) {
-+        bw_rsv_qos = ovsrec_qos_insert(ovs_idl_txn);
-+
-+        // struct smap external_ids = SMAP_INITIALIZER(&external_ids);
-+        // smap_add(&external_ids,"bandwidth-reserver-qos","true");
-+        const struct smap other_config = SMAP_CONST1(&other_config,"max-rate",DEFAULT_TUNNEL_IFACE_BW);
-+        const struct smap external_ids = SMAP_CONST1(&external_ids,"bandwidth-reserver-qos","true");
-+        ovsrec_qos_set_external_ids(bw_rsv_qos,&external_ids);
-+        ovsrec_qos_set_other_config(bw_rsv_qos,&other_config);
-+        ovsrec_qos_set_type(bw_rsv_qos,OVN_QOS_TYPE);
-+        // smap_destroy(&external_ids);
-+    }
-+    
++    bw_rsv_qos = ovsrec_qos_insert(ovs_idl_txn);
++    const struct smap external_ids = SMAP_CONST1(&external_ids,"bandwidth_reserver_qos","true");
++    const struct smap other_config = SMAP_CONST1(&other_config,"max-rate",DEFAULT_TUNNEL_IFACE_BW);
++    ovsrec_qos_set_external_ids(bw_rsv_qos,&external_ids);
++    ovsrec_qos_set_other_config(bw_rsv_qos,&other_config);
++    ovsrec_qos_set_type(bw_rsv_qos,OVN_QOS_TYPE);
 +    return bw_rsv_qos;
 +}
 +
@@ -188,18 +205,15 @@ index 000000000..9e6790b1f
 +}
 +
 +
-+static void sync_bandwidth_reserver_queue(struct shash_node *node, 
++static void sync_bandwidth_reserver_queue(struct ovn_bw_rsv *m, 
 +                                          struct ovsdb_idl_txn *ovs_idl_txn,
 +                                          struct shash *need_handle_bw_rsvs,
 +                                          const struct ovsrec_qos *bw_rsv_qos) 
 +{
-+    struct ovn_bw_rsv *m = node->data;
 +    if (should_delete_bw_rsv_queue(m)) {
-+        ovsrec_qos_update_queues_delkey(bw_rsv_qos,m->id);
 +        ovsrec_queue_delete(m->ovs_bw_rsv_queue);
-+        free(m->match);
-+        free(m);
-+        shash_delete(need_handle_bw_rsvs,node);
++        ovsrec_qos_update_queues_delkey(bw_rsv_qos,m->id);
++        shash_find_and_delete(need_handle_bw_rsvs,m->match);
 +        return;
 +    }
 +    else if (should_create_bw_rsv_queue(m)) { 
@@ -207,17 +221,14 @@ index 000000000..9e6790b1f
 +        m->ovs_bw_rsv_queue = ovsrec_queue_insert(ovs_idl_txn);
 +    }
 +
-+    struct smap other_configs = SMAP_INITIALIZER(&other_configs);
-+    struct smap external_ids = SMAP_INITIALIZER(&external_ids);
++    struct smap other_configs, external_ids;
 +    smap_add_format(&other_configs, "min-rate", "%ld", m->sb_bw_rsv->bandwidth);
-+    smap_add(&external_ids, "bandwidth-reserver-match",m->match);
++    smap_add(&external_ids, "bandwidth_reserver_match",m->match);
 +    /* Update local queue with sb bandwidth_reserver*/
 +    ovsrec_qos_update_queues_setkey(bw_rsv_qos, m->id, m->ovs_bw_rsv_queue);
 +    ovsrec_queue_set_dscp(m->ovs_bw_rsv_queue,&m->id,1);
 +    ovsrec_queue_set_external_ids(m->ovs_bw_rsv_queue,&external_ids);
 +    ovsrec_queue_set_other_config(m->ovs_bw_rsv_queue,&other_configs);
-+    smap_destroy(&other_configs);
-+    smap_destroy(&external_ids);
 +}
 +
 +static const char* get_tunnel_iface(const struct ovsrec_bridge *br_int) {
@@ -303,7 +314,7 @@ index 000000000..9e6790b1f
 +    hmap_init(&consistent_queues);
 +    NETDEV_QUEUE_FOR_EACH (&queue_id, &queue_details, &dump, netdev_phy) {
 +        bool is_queue_needed = false;
-+        SHASH_FOR_EACH_SAFE(node, need_handle_bw_rsvs) {
++        SHASH_FOR_EACH(node, need_handle_bw_rsvs) {
 +            is_queue_needed = true;
 +            struct ovn_bw_rsv *bw_rsv = node->data;
 +            if (bw_rsv->sb_bw_rsv->bandwidth ==
@@ -324,7 +335,7 @@ index 000000000..9e6790b1f
 +    }
 +
 +    /* Create/Update queues. */
-+    SHASH_FOR_EACH_SAFE (node, need_handle_bw_rsvs) {
++    SHASH_FOR_EACH (node, need_handle_bw_rsvs) {
 +        struct ovn_bw_rsv *bw_rsv = node->data;
 +        if (hmap_contains(&consistent_queues, &bw_rsv->node)) {
 +            hmap_remove(&consistent_queues, &bw_rsv->node);
@@ -372,7 +383,7 @@ index 000000000..9e6790b1f
 +
 +    /* Iterate through sb bandwidth_reserver and build the 'need_binding_bw_rsvs'. */
 +    struct shash_node *node;
-+    SHASH_FOR_EACH_SAFE (node, local_bindings) {
++    SHASH_FOR_EACH (node, local_bindings) {
 +        struct local_binding *lbinding = node->data;
 +        const struct sbrec_port_binding *pb =
 +            local_binding_get_primary_pb(local_bindings, lbinding->name);
@@ -384,7 +395,6 @@ index 000000000..9e6790b1f
 +            struct ovn_bw_rsv *m = xzalloc(sizeof *m);
 +            m->match = strdup(pb->bandwidth_reserver[i]->match);
 +            m->id = pb->bandwidth_reserver[i]->id;
-+            m->sb_bw_rsv = pb->bandwidth_reserver[i];
 +            shash_add(&need_handle_bw_rsvs,m->match,m);
 +        }
 +    }
@@ -400,8 +410,9 @@ index 000000000..9e6790b1f
 +    /* Iterate through the built 'need_handle_bw_rsvs' and
 +     * sync with the local ovsdb i.e.
 +     * create/update or delete the ovsrec queue(s). */
-+     SHASH_FOR_EACH_SAFE(node, &need_handle_bw_rsvs) {
-+        sync_bandwidth_reserver_queue(node, ovs_idl_txn, &need_handle_bw_rsvs, bw_rsv_qos);
++     SHASH_FOR_EACH (node, &need_handle_bw_rsvs) {
++        struct ovn_bw_rsv *m = node->data;
++        sync_bandwidth_reserver_queue(m, ovs_idl_txn, &need_handle_bw_rsvs, bw_rsv_qos);
 +    }
 +
 +    // Install queue into tunnel interface
@@ -417,51 +428,8 @@ index 000000000..9e6790b1f
 +    shash_destroy(&need_handle_bw_rsvs);
 +}
 \ No newline at end of file
-diff --git a/controller/bandwidth-reserver.h b/controller/bandwidth-reserver.h
-new file mode 100644
-index 000000000..3609951e8
---- /dev/null
-+++ b/controller/bandwidth-reserver.h
-@@ -0,0 +1,37 @@
-+/* Copyright 2024 manglienket2001@gmai.com.
-+ *
-+ * Licensed under the Apache License, Version 2.0 (the "License");
-+ * you may not use this file except in compliance with the License.
-+ * You may obtain a copy of the License at:
-+ *
-+ *     http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+
-+
-+#ifndef OVN_BANDWIDTH_RESERVER_H
-+#define OVN_BANDWIDTH_RESERVER_H 1
-+
-+#include "openvswitch/shash.h"
-+
-+#define OVN_QOS_TYPE "linux-hfsc"
-+
-+struct ovsdb_idl_txn;
-+struct ovsrec_bridge;
-+struct sbrec_bandwidth_reserver_table;
-+struct shash;
-+
-+void bandwidth_reserver_register_ovs_idl(struct ovsdb_idl *);         
-+void bandwidth_reserver_init(void);
-+void bandwidth_reserver_destroy(void);
-+void bandwidth_reserver_run(struct ovsdb_idl_txn *,
-+                            const struct ovsrec_qos_table *, 
-+                            const struct ovsrec_bridge *,
-+                            struct shash *local_bindings);
-+
-+#endif
 diff --git a/controller/ovn-controller.c b/controller/ovn-controller.c
-index 2afb94611..29c1bcc9d 100644
+index be340d0..0db97eb 100644
 --- a/controller/ovn-controller.c
 +++ b/controller/ovn-controller.c
 @@ -76,6 +76,7 @@
@@ -472,15 +440,7 @@ index 2afb94611..29c1bcc9d 100644
  
  VLOG_DEFINE_THIS_MODULE(main);
  
-@@ -1016,6 +1017,7 @@ ctrl_register_ovs_idl(struct ovsdb_idl *ovs_idl)
-     bfd_register_ovs_idl(ovs_idl);
-     physical_register_ovs_idl(ovs_idl);
-     vif_plug_register_ovs_idl(ovs_idl);
-+    bandwidth_reserver_register_ovs_idl(ovs_idl);
- }
- 
- #define SB_NODES \
-@@ -3361,6 +3363,7 @@ main(int argc, char *argv[])
+@@ -3361,6 +3362,7 @@ main(int argc, char *argv[])
      patch_init();
      pinctrl_init();
      lflow_init();
@@ -488,23 +448,19 @@ index 2afb94611..29c1bcc9d 100644
      vif_plug_provider_initialize();
  
      /* Connect to OVS OVSDB instance. */
-@@ -4045,6 +4048,15 @@ main(int argc, char *argv[])
-                                             ovs_idl_loop.idl));
+@@ -4032,6 +4034,11 @@ main(int argc, char *argv[])
+                                     &runtime_data->local_active_ports_ras);
                          stopwatch_stop(PINCTRL_RUN_STOPWATCH_NAME,
                                         time_msec());
 +                        // hai dang code
-+                        // stopwatch_start("test",
-+                        //                 time_msec());                       
 +                        bandwidth_reserver_run(ovs_idl_txn,
 +                                               ovsrec_qos_table_get(ovs_idl_loop.idl),
-+                                               br_int,
++                                               br_int, 
 +                                               &runtime_data->lbinding_data.bindings);
-+                        // stopwatch_stop("test",
-+                        //                time_msec());
                          /* Updating monitor conditions if runtime data or
                           * logical datapath goups changed. */
                          if (engine_node_changed(&en_runtime_data)
-@@ -4286,6 +4298,7 @@ loop_done:
+@@ -4273,6 +4280,7 @@ loop_done:
      pinctrl_destroy();
      binding_destroy();
      patch_destroy();
@@ -513,7 +469,7 @@ index 2afb94611..29c1bcc9d 100644
      if_status_mgr_destroy(if_mgr);
      shash_destroy(&vif_plug_deleted_iface_ids);
 diff --git a/northd/en-northd.c b/northd/en-northd.c
-index 79da7e1c4..cce7949b9 100644
+index 79da7e1..cce7949 100644
 --- a/northd/en-northd.c
 +++ b/northd/en-northd.c
 @@ -70,6 +70,8 @@ void en_northd_run(struct engine_node *node, void *data)
@@ -535,7 +491,7 @@ index 79da7e1c4..cce7949b9 100644
          EN_OVSDB_GET(engine_get_input("SB_dns", node));
      input_data.sbrec_ip_multicast_table =
 diff --git a/northd/inc-proc-northd.c b/northd/inc-proc-northd.c
-index af55221e3..db5af3e76 100644
+index af55221..db5af3e 100644
 --- a/northd/inc-proc-northd.c
 +++ b/northd/inc-proc-northd.c
 @@ -60,7 +60,8 @@ VLOG_DEFINE_THIS_MODULE(inc_proc_northd);
@@ -575,7 +531,7 @@ index af55221e3..db5af3e76 100644
      engine_add_input(&en_northd, &en_sb_port_binding, NULL);
      engine_add_input(&en_northd, &en_sb_mac_binding, NULL);
 diff --git a/northd/northd.c b/northd/northd.c
-index f35e4ecb0..a62a93b3b 100644
+index fb73aed..8c798bb 100644
 --- a/northd/northd.c
 +++ b/northd/northd.c
 @@ -74,6 +74,9 @@ static struct eth_addr svc_monitor_mac_ea;
@@ -686,7 +642,7 @@ index f35e4ecb0..a62a93b3b 100644
                                &active_ha_chassis_grps);
      }
  
-@@ -5711,6 +5780,82 @@ build_lswitch_learn_fdb_od(
+@@ -5711,6 +5780,77 @@ build_lswitch_learn_fdb_od(
      }
  }
  
@@ -700,67 +656,62 @@ index f35e4ecb0..a62a93b3b 100644
 +    ovn_lflow_add(lflows, od, S_SWITCH_IN_QOS_MARK, 0, "1", "next;");
 +    ovn_lflow_add(lflows, od, S_SWITCH_OUT_QOS_MARK, 0, "1", "next;");
 +
-+    for(size_t i = 0; i < op->sb->n_bandwidth_reserver; i++) {
-+        struct sbrec_bandwidth_reserver *bw_reserver = op->sb->bandwidth_reserver[i];
++
++
++    for(size_t i = 0; i < op->nbsp->n_bandwidth_reserver; i++) {
++        struct nbrec_bandwidth_reserver *bw_reserver = op->nbsp->bandwidth_reserver[i];
++        struct uuid from_lport, to_lport;
++        char from_lport_s[UUID_LEN+1], to_lport_s[UUID_LEN+1];
 +        uint8_t ecn, dscp;
++
 +        ecn = bw_reserver->id % 4;
 +        dscp = bw_reserver->id - ecn; 
 +
-+        // if (!bw_reserver->to_lport || !bw_reserver->from_lport)
-+        // {
-+        //     break;
-+        // }
-+
-+        for (size_t j = 0; j < op->n_lsp_addrs; j++) {
-+            struct eth_addr from_mac = op->lsp_addrs->ea;
-+            if (ovs_scan(op->lsp_addrs->ea_s,
-+                        ETH_ADDR_SCAN_FMT, ETH_ADDR_SCAN_ARGS(from_mac))) {
-+                for (size_t k = 0; k < bw_reserver->n_to_lport; k++) {
-+                    struct eth_addr to_mac;
-+                    if (ovs_scan(bw_reserver->to_lport[k],
-+                        ETH_ADDR_SCAN_FMT, ETH_ADDR_SCAN_ARGS(to_mac))) {
-+
-+                        // Mark dscp bits for traffic in reverse direction
-+                        ds_clear(&match);
-+                        ds_clear(&action); 
-+
-+                        ds_put_format(&match,"eth.src == "ETH_ADDR_FMT " && ",
-+                                             ETH_ADDR_ARGS(to_mac));
-+                        ds_put_format(&match,"eth.dst == "ETH_ADDR_FMT,
-+                                             ETH_ADDR_ARGS(from_mac));
-+
-+                        if (dscp) {
-+                            ds_put_format(&action, "ip.ecn = %"PRIu8"; ip.dscp = %"PRIu8"; next;", ecn, dscp);
-+                        } else {
-+                            ds_put_format(&action, "ip.ecn = %"PRIu8"; next;", ecn);
-+                        }
-+                        ovn_lflow_add_with_hint(lflows, od, S_SWITCH_IN_QOS_MARK,
-+                                                200,ds_cstr(&match), 
-+                                                ds_cstr(&action),&bw_reserver->header_);
-+
-+                        // Set queue and  mark dscp bits in favorable direction   
-+                        ds_clear(&match); 
-+                        ds_clear(&action);
-+
-+                        ds_put_format(&match,"eth.src == "ETH_ADDR_FMT " && ",
-+                                             ETH_ADDR_ARGS(from_mac));
-+                        ds_put_format(&match,"eth.dst == "ETH_ADDR_FMT,
-+                                             ETH_ADDR_ARGS(to_mac)); 
-+
-+                        if (dscp) {
-+                            ds_put_format(&action, "ip.ecn = %"PRIu8"; ip.dscp = %"PRIu8";", ecn, dscp);
-+                        } else {
-+                            ds_put_format(&action, "ip.ecn = %"PRIu8";", ecn);
-+                        }   
-+                        ds_put_format(&action, "set_queue(%"PRId64"); next;", bw_reserver->id);
-+
-+                        ovn_lflow_add_with_hint(lflows, od, S_SWITCH_IN_QOS_MARK,
-+                                                200,ds_cstr(&match), 
-+                                                ds_cstr(&action),&bw_reserver->header_);
-+                    }
-+                }
-+            }
++        if (!ovs_scan(bw_reserver->match,
++                      "from_lport:%s;to_lport:%s",
++                      from_lport_s,to_lport_s))
++        {
++            break;
 +        }
++
++        if (uuid_from_string(&from_lport,from_lport_s)
++            || uuid_from_string(&to_lport,to_lport_s))
++        {
++            break;
++        }
++
++
++        // Mark dscp bits for traffic in reverse direction
++        ds_clear(&match);
++        ds_put_format(&match,
++                      "inport==\"" UUID_FMT "\""
++                      "&& outport==\"" UUID_FMT "\"",
++                      UUID_ARGS(&to_lport),
++                      UUID_ARGS(&from_lport));   
++
++        ds_clear(&action); 
++        if (dscp) {
++            ds_put_format(&action, "ip.ecn = %"PRIu8"; ip.dscp = %"PRIu8"; next;", ecn, dscp);
++        } else {
++            ds_put_format(&action, "ip.ecn = %"PRIu8"; next;", ecn);
++        }
++        ovn_lflow_add_with_hint(lflows, od, S_SWITCH_IN_QOS_MARK,
++                                UINT16_MAX - 2,ds_cstr(&match), 
++                                ds_cstr(&action),&bw_reserver->header_);
++
++        // Set queue and  mark dscp bits in favorable direction   
++        ds_clear(&match);    
++        ds_put_format(&match,
++                      "inport==\"" UUID_FMT "\""
++                      "&& outport==\"" UUID_FMT "\"",
++                      UUID_ARGS(&from_lport),
++                      UUID_ARGS(&to_lport));  
++        ds_put_format(&action, "set_queue(%"PRId64");", bw_reserver->id);
++
++        ovn_lflow_add_with_hint(lflows, od, S_SWITCH_IN_QOS_MARK,
++                                UINT16_MAX - 2,ds_cstr(&match), 
++                                ds_cstr(&action),&bw_reserver->header_);
++        
 +    }
 +    ds_destroy(&action);
 +    ds_destroy(&match);
@@ -769,7 +720,7 @@ index f35e4ecb0..a62a93b3b 100644
  /* Egress table 8: Egress port security - IP (priorities 90 and 80)
   * if port security enabled.
   *
-@@ -14039,6 +14184,7 @@ build_lswitch_and_lrouter_iterate_by_op(struct ovn_port *op,
+@@ -14008,6 +14148,7 @@ build_lswitch_and_lrouter_iterate_by_op(struct ovn_port *op,
                                      &lsi->actions, &lsi->match);
      build_lswitch_output_port_sec_op(op, lsi->lflows,
                                       &lsi->actions, &lsi->match);
@@ -777,7 +728,7 @@ index f35e4ecb0..a62a93b3b 100644
  
      /* Build Logical Router Flows. */
      build_adm_ctrl_flows_for_lrouter_port(op, lsi->lflows, &lsi->match,
-@@ -15143,6 +15289,168 @@ sync_meters(struct northd_input *input_data,
+@@ -15112,6 +15253,106 @@ sync_meters(struct northd_input *input_data,
      shash_destroy(&sb_meters);
  }
  
@@ -788,14 +739,7 @@ index f35e4ecb0..a62a93b3b 100644
 +{
 +    if (nb_bandwidth_reserver->bandwidth != sb_bandwidth_reserver->bandwidth) {
 +        return true;
-+    }
-+    if (!sb_bandwidth_reserver->from_lport)  {
-+        return true;
-+    }
-+
-+    if (!sb_bandwidth_reserver->to_lport)  {
-+        return true;
-+    }
++    } 
 +    return false;
 +}
 +
@@ -816,62 +760,8 @@ index f35e4ecb0..a62a93b3b 100644
 +}
 +
 +static void
-+get_uuid_from_match(const char *input, char *uuid1,  char *uuid2) {
-+   // Tìm vị trí bắt đầu của UUID thứ nhất
-+    const char *from_lport_start = strstr(input, "from_lport:") + strlen("from_lport:");
-+    
-+    // Tìm vị trí kết thúc của UUID thứ nhất
-+    const char *from_lport_end = strchr(from_lport_start, ';');
-+    
-+    // Sao chép UUID thứ nhất vào chuỗi uuid1
-+    strncpy(uuid1, from_lport_start, from_lport_end - from_lport_start);
-+    uuid1[UUID_LEN] = '\0'; // Kết thúc chuỗi
-+    
-+    // Tìm vị trí bắt đầu của UUID thứ hai
-+    const char *to_lport_start = strstr(input, "to_lport:") + strlen("to_lport:");
-+    
-+    // Sao chép UUID thứ hai vào chuỗi uuid2
-+    strcpy(uuid2, to_lport_start);
-+    uuid2[UUID_LEN] = '\0';
-+}
-+
-+static void
-+bw_rsv_set_lports(struct northd_input *input_data,
-+                  const struct sbrec_bandwidth_reserver *sb_bw_reserver)
-+{
-+    struct uuid from_lport_uuid, to_lport_uuid;
-+    char from_lport_s[UUID_LEN + 1], to_lport_s[UUID_LEN + 1];
-+
-+    get_uuid_from_match(sb_bw_reserver->match, from_lport_s, to_lport_s);
-+
-+    if ( !uuid_from_string_prefix(&from_lport_uuid,from_lport_s)
-+      || !uuid_from_string_prefix(&to_lport_uuid,to_lport_s))
-+    {
-+        return;
-+    }
-+
-+    const struct nbrec_logical_switch *ls;
-+    NBREC_LOGICAL_SWITCH_TABLE_FOR_EACH (ls,input_data->nbrec_logical_switch) 
-+    {
-+        size_t i;
-+        for (i = 0; i < ls->n_ports; i++) {
-+            if (uuid_equals(&ls->ports[i]->header_.uuid, &from_lport_uuid)) {
-+                sbrec_bandwidth_reserver_set_from_lport(sb_bw_reserver, 
-+                                                        (const char **) ls->ports[i]->addresses,
-+                                                        ls->ports[i]->n_addresses);
-+            } else if (uuid_equals(&ls->ports[i]->header_.uuid, &to_lport_uuid)) {
-+                sbrec_bandwidth_reserver_set_to_lport(sb_bw_reserver, 
-+                                                        (const char **) ls->ports[i]->addresses,
-+                                                        ls->ports[i]->n_addresses);
-+            }
-+        }
-+    }
-+}
-+
-+static void
 +sync_bw_reservers_iterate_nb_bw_reserver(struct ovsdb_idl_txn *ovnsb_txn,
 +                                         const struct nbrec_bandwidth_reserver *nb_bw_reserver,
-+                                         struct northd_input *input_data,
 +                                         struct shash *sb_bw_reservers,
 +                                         unsigned long *bw_reserver_bitmap)
 +{
@@ -882,6 +772,7 @@ index f35e4ecb0..a62a93b3b 100644
 +    if (!sb_bw_reserver) {
 +        sb_bw_reserver = sbrec_bandwidth_reserver_insert(ovnsb_txn);
 +        sbrec_bandwidth_reserver_set_match(sb_bw_reserver, nb_bw_reserver->match);
++
 +        new_sb_bw_reserver = true;
 +    } else {
 +        // If this object exist in both tables, mark it's id in bitmap
@@ -897,7 +788,6 @@ index f35e4ecb0..a62a93b3b 100644
 +    }
 +
 +    if (new_sb_bw_reserver || bandwidth_reserver_needs_update(nb_bw_reserver, sb_bw_reserver)) {
-+        bw_rsv_set_lports(input_data, sb_bw_reserver);
 +        sbrec_bandwidth_reserver_set_bandwidth(sb_bw_reserver, nb_bw_reserver->bandwidth);
 +    }
 +}
@@ -921,13 +811,12 @@ index f35e4ecb0..a62a93b3b 100644
 +    const struct sbrec_bandwidth_reserver *sb_bw_reserver;
 +    SBREC_BANDWIDTH_RESERVER_TABLE_FOR_EACH (sb_bw_reserver, input_data->sbrec_bandwidth_reserver_table) {
 +        shash_add(&sb_bw_reservers, sb_bw_reserver->match, sb_bw_reserver);
-+        bitmap_set1(bw_reserver_bitmap, sb_bw_reserver->id);
 +    }
 +
 +    // Sync bw_reserver table in nb with sb hash map
 +    const struct nbrec_bandwidth_reserver *nb_bw_reserver;
 +    NBREC_BANDWIDTH_RESERVER_TABLE_FOR_EACH (nb_bw_reserver, input_data->nbrec_bandwidth_reserver_table) {
-+        sync_bw_reservers_iterate_nb_bw_reserver(ovnsb_txn, nb_bw_reserver, input_data,
++        sync_bw_reservers_iterate_nb_bw_reserver(ovnsb_txn, nb_bw_reserver,
 +                                                 &sb_bw_reservers, bw_reserver_bitmap);
 +    }
 +
@@ -946,7 +835,7 @@ index f35e4ecb0..a62a93b3b 100644
  /*
   * struct 'dns_info' is used to sync the DNS records between OVN Northbound db
   * and Southbound db.
-@@ -15206,7 +15514,7 @@ sync_dns_entries(struct northd_input *input_data,
+@@ -15175,7 +15416,7 @@ sync_dns_entries(struct northd_input *input_data,
                                     input_data->sbrec_dns_table) {
          const char *nb_dns_uuid = smap_get(&sbrec_dns->external_ids, "dns_id");
          struct uuid dns_uuid;
@@ -955,7 +844,7 @@ index f35e4ecb0..a62a93b3b 100644
              sbrec_dns_delete(sbrec_dns);
              continue;
          }
-@@ -15570,6 +15878,7 @@ northd_destroy(struct northd_data *data)
+@@ -15539,6 +15780,7 @@ northd_destroy(struct northd_data *data)
                                  &data->lr_list);
  }
  
@@ -963,7 +852,7 @@ index f35e4ecb0..a62a93b3b 100644
  static void
  ovnnb_db_run(struct northd_input *input_data,
               struct northd_data *data,
-@@ -15656,7 +15965,7 @@ ovnnb_db_run(struct northd_input *input_data,
+@@ -15625,7 +15867,7 @@ ovnnb_db_run(struct northd_input *input_data,
      build_ovn_lbs(input_data, ovnsb_txn, &data->datapaths, &data->lbs);
      build_lrouter_lbs(&data->datapaths, &data->lbs);
      build_ports(input_data, ovnsb_txn, sbrec_chassis_by_name,
@@ -972,7 +861,7 @@ index f35e4ecb0..a62a93b3b 100644
                  &data->datapaths, &data->ports);
      build_lrouter_lbs_reachable_ips(&data->datapaths, &data->lbs);
      build_ovn_lr_lbs(&data->datapaths, &data->lbs);
-@@ -15675,6 +15984,7 @@ ovnnb_db_run(struct northd_input *input_data,
+@@ -15644,6 +15886,7 @@ ovnnb_db_run(struct northd_input *input_data,
      sync_port_groups(input_data, ovnsb_txn, &data->port_groups);
      sync_meters(input_data, ovnsb_txn, &data->meter_groups);
      sync_dns_entries(input_data, ovnsb_txn, &data->datapaths);
@@ -981,7 +870,7 @@ index f35e4ecb0..a62a93b3b 100644
      stopwatch_stop(CLEAR_LFLOWS_CTX_STOPWATCH_NAME, time_msec());
  
 diff --git a/northd/northd.h b/northd/northd.h
-index e7ed26c10..e6ee95ce8 100644
+index e7ed26c..e6ee95c 100644
 --- a/northd/northd.h
 +++ b/northd/northd.h
 @@ -18,6 +18,7 @@
@@ -1009,7 +898,7 @@ index e7ed26c10..e6ee95ce8 100644
      const struct sbrec_dns_table *sbrec_dns_table;
      const struct sbrec_ip_multicast_table *sbrec_ip_multicast_table;
 diff --git a/ovn-nb.ovsschema b/ovn-nb.ovsschema
-index 80b830629..0a194c080 100644
+index 80b8306..0a194c0 100644
 --- a/ovn-nb.ovsschema
 +++ b/ovn-nb.ovsschema
 @@ -1,7 +1,7 @@
@@ -1052,7 +941,7 @@ index 80b830629..0a194c080 100644
              "columns": {
                  "name": {"type": "string"},
 diff --git a/ovn-nb.xml b/ovn-nb.xml
-index d05f96942..19e636adf 100644
+index d8781d1..ed9728b 100644
 --- a/ovn-nb.xml
 +++ b/ovn-nb.xml
 @@ -860,6 +860,10 @@
@@ -1112,7 +1001,7 @@ index d05f96942..19e636adf 100644
      <p>
        Each row in this table represents a meter that can be used for QoS or
 diff --git a/ovn-sb.ovsschema b/ovn-sb.ovsschema
-index 122614dd5..fdafc5ccd 100644
+index 122614d..bb04c6b 100644
 --- a/ovn-sb.ovsschema
 +++ b/ovn-sb.ovsschema
 @@ -1,7 +1,7 @@
@@ -1120,22 +1009,16 @@ index 122614dd5..fdafc5ccd 100644
      "name": "OVN_Southbound",
      "version": "20.21.0",
 -    "cksum": "2362446865 26963",
-+    "cksum": "3303048496 28118",
++    "cksum": "165114449 27810",
      "tables": {
          "SB_Global": {
              "columns": {
-@@ -142,6 +142,23 @@
+@@ -142,6 +142,17 @@
              "indexes": [["datapath", "tunnel_key"],
                          ["datapath", "name"]],
              "isRoot": true},
 +        "Bandwidth_Reserver": {
 +            "columns": {
-+                "from_lport": {"type": {"key": "string",
-+                                 "min": 0,
-+                                 "max": "unlimited"}},
-+                "to_lport": {"type": {"key": "string",
-+                                 "min": 0,
-+                                 "max": "unlimited"}},
 +                "match": {"type": "string"},
 +                "bandwidth": {"type": {"key": {"type": "integer",
 +                                                 "minInteger": 1,
@@ -1148,7 +1031,7 @@ index 122614dd5..fdafc5ccd 100644
          "Meter": {
              "columns": {
                  "name": {"type": "string"},
-@@ -195,6 +212,11 @@
+@@ -195,6 +206,11 @@
                                       "refType": "strong"},
                               "min": 0,
                               "max": 1}},
@@ -1161,10 +1044,10 @@ index 122614dd5..fdafc5ccd 100644
                       "type": {"key": "string",
                                "value": "string",
 diff --git a/ovn-sb.xml b/ovn-sb.xml
-index b1c985746..b3d614083 100644
+index b1c9857..56ca35b 100644
 --- a/ovn-sb.xml
 +++ b/ovn-sb.xml
-@@ -2662,6 +2662,56 @@ tcp.flags = RST;
+@@ -2662,6 +2662,44 @@ tcp.flags = RST;
      </column>
    </table>
  
@@ -1173,18 +1056,6 @@ index b1c985746..b3d614083 100644
 +      Each row in this table represents a reserver which guarantees minimum
 +      bandwidth for an overlay virtual link (use tunnel) in one direction.
 +    </p>
-+
-+    <column name="from_lport">
-+      <p>
-+        MAC of lsp which send traffic.
-+      </p>
-+    </column>
-+
-+    <column name="to_lport">
-+      <p>
-+        MAC of lsp which receive traffic.
-+      </p>
-+    </column>
 +
 +    <column name="match">
 +      <p>
@@ -1221,7 +1092,7 @@ index b1c985746..b3d614083 100644
    <table name="Meter" title="Meter entry">
      <p>
        Each row in this table represents a meter that can be used for QoS or
-@@ -2895,6 +2945,11 @@ tcp.flags = RST;
+@@ -2895,6 +2933,11 @@ tcp.flags = RST;
          an OVN deployment.) OVN does not prescribe a particular format for the
          logical port ID.
        </column>
@@ -1233,8 +1104,15 @@ index b1c985746..b3d614083 100644
  
        <column name="encap">
          Points to supported encapsulation configurations to transmit
+diff --git a/ovs b/ovs
+new file mode 160000
+index 0000000..b5dec43
+--- /dev/null
++++ b/ovs
+@@ -0,0 +1 @@
++Subproject commit b5dec433cb5e14f03cc31f47ce75f3f7bc58905c
 diff --git a/utilities/ovn-nbctl.c b/utilities/ovn-nbctl.c
-index 751a9011d..f7845ca1a 100644
+index 2d78167..5ac3ed1 100644
 --- a/utilities/ovn-nbctl.c
 +++ b/utilities/ovn-nbctl.c
 @@ -271,6 +271,15 @@ QoS commands:\n\
@@ -1253,7 +1131,7 @@ index 751a9011d..f7845ca1a 100644
  Meter commands:\n\
    [--fair]\n\
    meter-add NAME ACTION RATE UNIT [BURST]\n\
-@@ -6906,6 +6915,278 @@ cmd_ha_ch_grp_set_chassis_prio(struct ctl_context *ctx)
+@@ -6905,6 +6914,278 @@ cmd_ha_ch_grp_set_chassis_prio(struct ctl_context *ctx)
      nbrec_ha_chassis_set_priority(ha_chassis, priority);
  }
  
@@ -1532,7 +1410,7 @@ index 751a9011d..f7845ca1a 100644
  static const struct ctl_table_class tables[NBREC_N_TABLES] = {
      [NBREC_TABLE_DHCP_OPTIONS].row_ids
      = {{&nbrec_logical_switch_port_col_name, NULL,
-@@ -6999,6 +7280,16 @@ static const struct ctl_command_syntax nbctl_commands[] = {
+@@ -6998,6 +7279,16 @@ static const struct ctl_command_syntax nbctl_commands[] = {
      { "qos-list", 1, 1, "SWITCH", nbctl_pre_qos_list, nbctl_qos_list,
        NULL, "", RO },
  
