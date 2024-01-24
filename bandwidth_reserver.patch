@@ -42,7 +42,7 @@ index c2ab1bbe6..85524387e 100644
  man_MANS += controller/ovn-controller.8
 diff --git a/controller/bandwidth-reserver.c b/controller/bandwidth-reserver.c
 new file mode 100644
-index 000000000..8eb957e04
+index 000000000..6e557fb47
 --- /dev/null
 +++ b/controller/bandwidth-reserver.c
 @@ -0,0 +1,374 @@
@@ -83,8 +83,8 @@ index 000000000..8eb957e04
 +
 +VLOG_DEFINE_THIS_MODULE(bandwidth_reserver);
 +
-+/* By default, tunnel interface bandwidth is 10Gb*/
-+#define DEFAULT_TUNNEL_IFACE_BW "10000000000"
++/* By default, tunnel interface bandwidth is 1Gb*/
++#define DEFAULT_TUNNEL_IFACE_BW "1000000000"
 +
 +struct ovn_bw_rsv {
 +    char *match;
