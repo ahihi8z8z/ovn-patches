@@ -1,6 +1,6 @@
  .gitignore                      |   2 +
  controller/automake.mk          |   4 +-
- controller/bandwidth-reserver.c | 370 ++++++++++++++++++++++++++++++++++++++++
+ controller/bandwidth-reserver.c | 374 ++++++++++++++++++++++++++++++++++++++++
  controller/bandwidth-reserver.h |  37 ++++
  controller/ovn-controller.c     |  13 ++
  northd/en-northd.c              |   4 +
@@ -12,7 +12,7 @@
  ovn-sb.ovsschema                |  24 ++-
  ovn-sb.xml                      |  55 ++++++
  utilities/ovn-nbctl.c           | 291 +++++++++++++++++++++++++++++++
- 14 files changed, 1180 insertions(+), 9 deletions(-)
+ 14 files changed, 1184 insertions(+), 9 deletions(-)
 
 diff --git a/.gitignore b/.gitignore
 index 7ca9b3859..e1edf28c5 100644
@@ -42,10 +42,10 @@ index c2ab1bbe6..85524387e 100644
  man_MANS += controller/ovn-controller.8
 diff --git a/controller/bandwidth-reserver.c b/controller/bandwidth-reserver.c
 new file mode 100644
-index 000000000..9e6790b1f
+index 000000000..8eb957e04
 --- /dev/null
 +++ b/controller/bandwidth-reserver.c
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,374 @@
 +/* Copyright 2024 manglienket2001@gmai.com
 + *
 + * Licensed under the Apache License, Version 2.0 (the "License");
@@ -150,6 +150,10 @@ index 000000000..9e6790b1f
 +            }
 +            break;
 +        }
++    }
++
++    if (!ovs_idl_txn) {
++        return NULL;
 +    }
 +
 +    /* If there isn't bandwidth_reserver_qos, create one*/
@@ -392,7 +396,7 @@ index 000000000..9e6790b1f
 +    const struct ovsrec_qos *bw_rsv_qos = get_bandwidth_reserver_qos(qos_table, ovs_idl_txn, &need_handle_bw_rsvs);
 +
 +    /* No bandwidth reserver queue need handling*/
-+    if (shash_is_empty(&need_handle_bw_rsvs)) {
++    if (shash_is_empty(&need_handle_bw_rsvs) || NULL == bw_rsv_qos) {
 +        shash_destroy(&need_handle_bw_rsvs);
 +        return;
 +    }
