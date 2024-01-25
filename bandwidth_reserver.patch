@@ -1,18 +1,18 @@
  .gitignore                      |   2 +
  controller/automake.mk          |   4 +-
- controller/bandwidth-reserver.c | 374 ++++++++++++++++++++++++++++++++++++++++
- controller/bandwidth-reserver.h |  37 ++++
- controller/ovn-controller.c     |  13 ++
+ controller/bandwidth-reserver.c | 444 ++++++++++++++++++++++++++++++++++++++++
+ controller/bandwidth-reserver.h |  39 ++++
+ controller/ovn-controller.c     |  14 ++
  northd/en-northd.c              |   4 +
  northd/inc-proc-northd.c        |   8 +-
- northd/northd.c                 | 318 +++++++++++++++++++++++++++++++++-
+ northd/northd.c                 | 318 +++++++++++++++++++++++++++-
  northd/northd.h                 |   3 +
  ovn-nb.ovsschema                |  18 +-
- ovn-nb.xml                      |  42 +++++
+ ovn-nb.xml                      |  42 ++++
  ovn-sb.ovsschema                |  24 ++-
- ovn-sb.xml                      |  55 ++++++
- utilities/ovn-nbctl.c           | 291 +++++++++++++++++++++++++++++++
- 14 files changed, 1184 insertions(+), 9 deletions(-)
+ ovn-sb.xml                      |  55 +++++
+ utilities/ovn-nbctl.c           | 291 ++++++++++++++++++++++++++
+ 14 files changed, 1257 insertions(+), 9 deletions(-)
 
 diff --git a/.gitignore b/.gitignore
 index 7ca9b3859..e1edf28c5 100644
@@ -42,10 +42,10 @@ index c2ab1bbe6..85524387e 100644
  man_MANS += controller/ovn-controller.8
 diff --git a/controller/bandwidth-reserver.c b/controller/bandwidth-reserver.c
 new file mode 100644
-index 000000000..6e557fb47
+index 000000000..c9384837e
 --- /dev/null
 +++ b/controller/bandwidth-reserver.c
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,444 @@
 +/* Copyright 2024 manglienket2001@gmai.com
 + *
 + * Licensed under the Apache License, Version 2.0 (the "License");
@@ -63,6 +63,7 @@ index 000000000..6e557fb47
 +
 +#include <config.h>
 +#include <unistd.h>
++#include <string.h>
 +
 +/* library headers */
 +#include "lib/sset.h"
@@ -84,7 +85,7 @@ index 000000000..6e557fb47
 +VLOG_DEFINE_THIS_MODULE(bandwidth_reserver);
 +
 +/* By default, tunnel interface bandwidth is 1Gb*/
-+#define DEFAULT_TUNNEL_IFACE_BW "1000000000"
++#define DEFAULT_TUNNEL_IFACE_BW 1000000000
 +
 +struct ovn_bw_rsv {
 +    char *match;
@@ -107,9 +108,61 @@ index 000000000..6e557fb47
 +    ovsdb_idl_add_column(ovs_idl, &ovsrec_qos_col_type);
 +}
 +
++static char* 
++find_substr(const char *s, const char *PATTERN1, const char *PATTERN2) 
++{
++    char *target = NULL;
++    char *start, *end;
++
++    start = strstr( s, PATTERN1 );
++    if (start)
++    {
++        start += strlen( PATTERN1 );
++        end = strstr( start, PATTERN2 );
++        if (end)
++        {
++            target = ( char * )malloc( end - start + 1 );
++            memcpy( target, start, end - start );
++            target[end - start] = '\0';
++        }
++    }
++    return target;
++}
++
++/* Parse link speed of tunnel innteface of chassis in bps.
++ * The format is: rp_tunnelled:egress:ingress. Egress / ingress is meant from 
++ * the perspective of a cloud server. That is egress = cloud server upload, 
++ * ingress = download. Egress and ingress available bandwidth values are in 
++ * kilobit/sec (kbps). In here, we only get egress bandwidth.
++ * 
++ * Source: https://docs.openstack.org/neutron/latest/admin/config-qos-min-bw.html */
++static long long int
++get_tunnel_link_speed (const struct sbrec_chassis *chassis) {
++    const char *cms_options = smap_get_def(&chassis->external_ids, "ovn-cms-options", "");
++    long long int bw_bps = 0;
++    if (strcmp(cms_options,"")) {
++        char *tnl_bw_option = NULL, *tnl_max_bw_s = NULL;
++
++        tnl_bw_option = find_substr(cms_options, "resource_provider_bandwidths=", ",");
++
++        if (tnl_bw_option) {
++            tnl_max_bw_s = find_substr((const char *)tnl_bw_option, "rp_tunnelled:",":");
++
++            if (tnl_max_bw_s) {
++                long long int bw_kbps;
++                if (str_to_llong(tnl_max_bw_s, 10, &bw_kbps)) {
++                    bw_bps = bw_kbps * 1000;
++                }
++                free(tnl_max_bw_s);
++            }
++            free(tnl_bw_option);
++        }
++    }
++    return bw_bps;
++}
 +
 +static void
-+set_qos_type(struct netdev *netdev, const char *type)
++set_qos_type(struct netdev *netdev, const char *type, long long int max_rate)
 +{
 +    /* 34359738360 == (2^32 - 1) * 8.  netdev_set_qos() doesn't support
 +     * 64-bit rate netlink attributes, so the maximum value is 2^32 - 1 bytes.
@@ -117,25 +170,38 @@ index 000000000..6e557fb47
 +     * Without setting max-rate the reported link speed will be used, which
 +     * can be unrecognized for certain NICs or reported too low for virtual
 +     * interfaces. */
-+    const struct smap conf = SMAP_CONST1(&conf, "max-rate", DEFAULT_TUNNEL_IFACE_BW);
++    struct smap conf = SMAP_INITIALIZER(&conf);
++    smap_add_format(&conf, "max-rate", "%lld",max_rate); 
 +    int error = netdev_set_qos(netdev, type, &conf);
 +    if (error) {
 +        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
 +        VLOG_WARN_RL(&rl, "%s: could not set qdisc type \"%s\" (%s)",
 +                     netdev_get_name(netdev), type, ovs_strerror(error));
 +    }
++    smap_destroy(&conf);
 +}
 +
 +
 +static const struct ovsrec_qos*  get_bandwidth_reserver_qos(const struct ovsrec_qos_table *qos_table,
 +                                       struct ovsdb_idl_txn *ovs_idl_txn,
-+                                       struct shash *ovn_bw_rsvs ) {
++                                       struct shash *ovn_bw_rsvs,
++                                       long long int max_rate) {
++    if (!ovs_idl_txn) {
++        return NULL;
++    }
++
 +    const struct ovsrec_qos *bw_rsv_qos;
 +    bool bw_rsv_qos_check = false;
 +
 +    OVSREC_QOS_TABLE_FOR_EACH (bw_rsv_qos, qos_table) {
 +        bw_rsv_qos_check = smap_get_bool(&bw_rsv_qos->external_ids,"bandwidth-reserver-qos", false);
 +        if (bw_rsv_qos_check) {
++            //update max-rate of qos
++            struct smap other_config = SMAP_INITIALIZER(&other_config);
++            smap_add_format(&other_config, "max-rate", "%lld",max_rate); 
++            ovsrec_qos_set_other_config(bw_rsv_qos,&other_config);
++            smap_destroy(&other_config);
++
 +            for( size_t i = 0; i < bw_rsv_qos->n_queues; i++) {
 +                struct smap external_ids = bw_rsv_qos->value_queues[i]->external_ids;
 +                const char *queue_match = smap_get(&external_ids,"bandwidth-reserver-match");
@@ -152,22 +218,19 @@ index 000000000..6e557fb47
 +        }
 +    }
 +
-+    if (!ovs_idl_txn) {
-+        return NULL;
-+    }
++
 +
 +    /* If there isn't bandwidth_reserver_qos, create one*/
 +    if (!bw_rsv_qos_check) {
 +        bw_rsv_qos = ovsrec_qos_insert(ovs_idl_txn);
 +
-+        // struct smap external_ids = SMAP_INITIALIZER(&external_ids);
-+        // smap_add(&external_ids,"bandwidth-reserver-qos","true");
-+        const struct smap other_config = SMAP_CONST1(&other_config,"max-rate",DEFAULT_TUNNEL_IFACE_BW);
++        struct smap other_config = SMAP_INITIALIZER(&other_config);
++        smap_add_format(&other_config, "max-rate", "%lld",max_rate); 
 +        const struct smap external_ids = SMAP_CONST1(&external_ids,"bandwidth-reserver-qos","true");
 +        ovsrec_qos_set_external_ids(bw_rsv_qos,&external_ids);
 +        ovsrec_qos_set_other_config(bw_rsv_qos,&other_config);
 +        ovsrec_qos_set_type(bw_rsv_qos,OVN_QOS_TYPE);
-+        // smap_destroy(&external_ids);
++        smap_destroy(&other_config);
 +    }
 +    
 +    return bw_rsv_qos;
@@ -239,7 +302,8 @@ index 000000000..6e557fb47
 +    return NULL;
 +}
 +
-+static void queues_install(const char* tunnel_iface, struct shash *need_handle_bw_rsvs) {
++static void 
++queues_install(const char* tunnel_iface, struct shash *need_handle_bw_rsvs, long long int max_rate) {
 +    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
 +    struct netdev *netdev_phy;
 +
@@ -285,14 +349,14 @@ index 000000000..6e557fb47
 +     *     - Otherwise leave the qdisc alone. */
 +    if (shash_is_empty(need_handle_bw_rsvs)) {
 +        if (!strcmp(qdisc_type, OVN_QOS_TYPE)) {
-+            set_qos_type(netdev_phy, "");
++            set_qos_type(netdev_phy, "", max_rate);
 +        }
 +        netdev_close(netdev_phy);
 +        return;
 +    }
 +    /* Configure qdisc. */
 +    if (strcmp(qdisc_type, OVN_QOS_TYPE)) {
-+        set_qos_type(netdev_phy, OVN_QOS_TYPE);
++        set_qos_type(netdev_phy, OVN_QOS_TYPE,max_rate);
 +    }
 +
 +    /* Check and delete if needed. */
@@ -337,7 +401,7 @@ index 000000000..6e557fb47
 +
 +        smap_clear(&queue_details);
 +        smap_add_format(&queue_details, "min-rate", "%ld", bw_rsv->sb_bw_rsv->bandwidth);
-+        smap_add(&queue_details,"max-rate",DEFAULT_TUNNEL_IFACE_BW);
++        smap_add_format(&queue_details, "max-rate", "%lld",max_rate); 
 +        error = netdev_set_queue(netdev_phy, bw_rsv->id,
 +                                 &queue_details);
 +        if (error) {
@@ -365,7 +429,8 @@ index 000000000..6e557fb47
 +void bandwidth_reserver_run(struct ovsdb_idl_txn *ovs_idl_txn,
 +                            const struct ovsrec_qos_table *qos_table,
 +                            const struct ovsrec_bridge *br_int,
-+                            struct shash *local_bindings)
++                            struct shash *local_bindings,
++                            const struct sbrec_chassis *chassis)
 +{
 +    struct shash need_handle_bw_rsvs = SHASH_INITIALIZER(&need_handle_bw_rsvs);
 +    
@@ -392,8 +457,13 @@ index 000000000..6e557fb47
 +            shash_add(&need_handle_bw_rsvs,m->match,m);
 +        }
 +    }
++    /* Get link speed of tunnel interface */
++    long long max_rate = get_tunnel_link_speed(chassis);
++    if (!max_rate) {
++        max_rate = DEFAULT_TUNNEL_IFACE_BW;
++    } 
 +    /* Iterate through ovs queues and add to the 'need_handle_bw_rsvs'. */
-+    const struct ovsrec_qos *bw_rsv_qos = get_bandwidth_reserver_qos(qos_table, ovs_idl_txn, &need_handle_bw_rsvs);
++    const struct ovsrec_qos *bw_rsv_qos = get_bandwidth_reserver_qos(qos_table, ovs_idl_txn, &need_handle_bw_rsvs, max_rate);
 +
 +    /* No bandwidth reserver queue need handling*/
 +    if (shash_is_empty(&need_handle_bw_rsvs) || NULL == bw_rsv_qos) {
@@ -409,7 +479,7 @@ index 000000000..6e557fb47
 +    }
 +
 +    // Install queue into tunnel interface
-+    queues_install(tunnel_iface,&need_handle_bw_rsvs);
++    queues_install(tunnel_iface,&need_handle_bw_rsvs, max_rate);
 +
 +    SHASH_FOR_EACH_SAFE (node, &need_handle_bw_rsvs) {
 +        struct ovn_bw_rsv * m = node->data;
@@ -423,10 +493,10 @@ index 000000000..6e557fb47
 \ No newline at end of file
 diff --git a/controller/bandwidth-reserver.h b/controller/bandwidth-reserver.h
 new file mode 100644
-index 000000000..087cbb1f2
+index 000000000..bfb6fe123
 --- /dev/null
 +++ b/controller/bandwidth-reserver.h
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,39 @@
 +/* Copyright 2024 manglienket2001@gmai.com.
 + *
 + * Licensed under the Apache License, Version 2.0 (the "License");
@@ -453,6 +523,7 @@ index 000000000..087cbb1f2
 +struct ovsdb_idl_txn;
 +struct ovsrec_bridge;
 +struct sbrec_bandwidth_reserver_table;
++struct sbrec_chassis;
 +struct shash;
 +
 +void bandwidth_reserver_register_ovs_idl(struct ovsdb_idl *);         
@@ -461,11 +532,12 @@ index 000000000..087cbb1f2
 +void bandwidth_reserver_run(struct ovsdb_idl_txn *,
 +                            const struct ovsrec_qos_table *, 
 +                            const struct ovsrec_bridge *,
-+                            struct shash *local_bindings);
++                            struct shash *,
++                            const struct sbrec_chassis *);
 +
 +#endif
 diff --git a/controller/ovn-controller.c b/controller/ovn-controller.c
-index 2afb94611..29c1bcc9d 100644
+index 2afb94611..a00c29734 100644
 --- a/controller/ovn-controller.c
 +++ b/controller/ovn-controller.c
 @@ -76,6 +76,7 @@
@@ -492,7 +564,7 @@ index 2afb94611..29c1bcc9d 100644
      vif_plug_provider_initialize();
  
      /* Connect to OVS OVSDB instance. */
-@@ -4045,6 +4048,15 @@ main(int argc, char *argv[])
+@@ -4045,6 +4048,16 @@ main(int argc, char *argv[])
                                              ovs_idl_loop.idl));
                          stopwatch_stop(PINCTRL_RUN_STOPWATCH_NAME,
                                         time_msec());
@@ -502,13 +574,14 @@ index 2afb94611..29c1bcc9d 100644
 +                        bandwidth_reserver_run(ovs_idl_txn,
 +                                               ovsrec_qos_table_get(ovs_idl_loop.idl),
 +                                               br_int,
-+                                               &runtime_data->lbinding_data.bindings);
++                                               &runtime_data->lbinding_data.bindings,
++                                               chassis);
 +                        // stopwatch_stop("test",
 +                        //                time_msec());
                          /* Updating monitor conditions if runtime data or
                           * logical datapath goups changed. */
                          if (engine_node_changed(&en_runtime_data)
-@@ -4286,6 +4298,7 @@ loop_done:
+@@ -4286,6 +4299,7 @@ loop_done:
      pinctrl_destroy();
      binding_destroy();
      patch_destroy();
